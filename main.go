@@ -48,10 +48,20 @@ var (
 	impersonateLoggedOnUser = modadvapi32.NewProc("ImpersonateLoggedOnUser")
 	openProcessToken        = modadvapi32.NewProc("OpenProcessToken")
 	duplicateTokenEx        = modadvapi32.NewProc("DuplicateTokenEx")
+	procDeleteAce           = modadvapi32.NewProc("DeleteAce")
+	procInitializeAcl       = modadvapi32.NewProc("InitializeAcl")
 )
 
 func enableSeDebugPrivilege() error {
 	return winio.EnableProcessPrivileges([]string{"SeDebugPrivilege"})
+}
+
+func deleteAce(acl *windows.ACL, aceIndex uint32) (*windows.ACL, error) {
+	res, _, err := procDeleteAce.Call(uintptr(unsafe.Pointer(acl)), uintptr(aceIndex))
+	if res == 0 {
+		return nil, err
+	}
+	return acl, nil
 }
 
 func parseProcessName(exeFile [windows.MAX_PATH]uint16) string {
@@ -195,6 +205,7 @@ func main() {
 	var services stringSlice
 	flag.Var(&services, "services", "List of services to disable (comma separated)")
 	targetdll := flag.String("target", "C:\\WINDOWS\\SYSTEM32\\KERNEL32.DLL", "Target to prohibit loading")
+	remove := flag.Bool("remove", false, "Remove all DENY ACLs from specified target rather than adding them")
 
 	flag.Parse()
 
@@ -234,32 +245,59 @@ func main() {
 		os.Exit(1)
 	}
 
-	var trusteelist []windows.EXPLICIT_ACCESS
+	var sids []*windows.SID
 	for _, service := range services {
-		defend, err := windows.StringToSid(serviceSid(service))
+		sid, err := windows.StringToSid(serviceSid(service))
 		if err != nil {
 			fmt.Printf("cannot convert SID to string: %v\n", err)
 			os.Exit(1)
 		}
-
-		trustee := windows.TrusteeValueFromSID(defend)
-
-		trusteelist = append(trusteelist, windows.EXPLICIT_ACCESS{
-			AccessPermissions: windows.GENERIC_ALL,
-			AccessMode:        windows.DENY_ACCESS,
-			Inheritance:       windows.NO_INHERITANCE,
-			Trustee: windows.TRUSTEE{
-				TrusteeForm:  windows.TRUSTEE_IS_SID,
-				TrusteeType:  windows.TRUSTEE_IS_UNKNOWN,
-				TrusteeValue: trustee,
-			},
-		})
+		sids = append(sids, sid)
 	}
 
-	newacl, err := windows.ACLFromEntries(trusteelist, acl)
-	if err != nil {
-		fmt.Printf("cannot create new ACL: %v\n", err)
-		os.Exit(1)
+	var newacl *windows.ACL
+	if *remove {
+		newacl = acl
+		var ace *windows.ACCESS_ALLOWED_ACE
+		i := 0
+		for {
+			err = windows.GetAce(newacl, uint32(i), &ace)
+			if err != nil {
+				fmt.Printf("Error getting ACE %v: %v\n", i, err)
+				os.Exit(1)
+			}
+			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+				newacl, err = deleteAce(newacl, uint32(i))
+				if err != nil {
+					fmt.Printf("Error deleting ACE %v: %v\n", i, err)
+					os.Exit(1)
+				}
+				continue
+			}
+			i++
+			if i >= int(acl.AceCount) {
+				break
+			}
+		}
+	} else {
+		var trusteelist []windows.EXPLICIT_ACCESS
+		for _, sid := range sids {
+			trusteelist = append(trusteelist, windows.EXPLICIT_ACCESS{
+				AccessPermissions: windows.GENERIC_ALL,
+				AccessMode:        windows.DENY_ACCESS,
+				Inheritance:       windows.NO_INHERITANCE,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_UNKNOWN,
+					TrusteeValue: windows.TrusteeValueFromSID(sid),
+				},
+			})
+		}
+		newacl, err = windows.ACLFromEntries(trusteelist, acl)
+		if err != nil {
+			fmt.Printf("cannot create new ACL: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	if err := windows.SetNamedSecurityInfo(

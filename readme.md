@@ -15,13 +15,24 @@ Disable Microsoft Defender user space part with simple ACL deny ACL
 - build it: `cd defender-acl-blocker && garble -tiny -literals -seed=random build .`
 
 ### Run it:
-From elevated command prompt:
-
+From an elevated command prompt:
 ```
+# Standard run (adds DENY ACLs)
 defender-acl-blocker.exe
+
+# Undo changes (revokes applied ACLs)
+defender-acl-blocker.exe -remove
+
+# Custom targets and services
+defender-acl-blocker.exe -target C:\path\to\file.dll -services "Service1,Service2"
 ```
 
-Reboot. Defender primary user mode service can not start anymore.
+### Options:
+- `-remove`: Revokes access (removes entry) for the specified services instead of adding a DENY entry.
+- `-services`: A comma-separated list of service names to apply the ACL to (default: WinDefend, mpssvc, Sense, etc.).
+- `-target`: The file to apply the ACLs to (default: `C:\Windows\System32\kernel32.dll`).
+
+Reboot after applying changes. Defender primary user mode service can not start anymore.
 
 ## How it works
 
